@@ -26,6 +26,7 @@ We provide `R` code to implement the reduction-based algorithm. The following `R
 
 ### Datasets
 We include the datasets:
+
 - Compas
 - Communities and Crime
 
@@ -33,8 +34,10 @@ We cannot publicly share the data used in the consumer lending experiments.
 
 ### Usage 
 The `R` markdown scripts in the directories
+
 - `Compas_Experiments/`
 - `Communities_Experiments/`
+
 can be used to reproduce the recidivism risk prediction and regression experiments in the paper. 
 
 The functions in `Code/ExponentiatedGradient.R` implement the reduction-based algorithms. To search for the disparity minimizing model in the set of good models, see the function `run_expgrad_extremes`. To search for the absolute disparity minimizing in the set of good models, see the function `run_expgrad_minDisp`.
