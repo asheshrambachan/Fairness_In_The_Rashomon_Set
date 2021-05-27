@@ -18,9 +18,11 @@ This paper will appear in ICML 2021. Here is the [arXiv link](https://arxiv.org/
 
 ### Requirements
 
-We provide \texttt{R} code to implement the reduction-based algorithm. The following \texttt{R} packages are used:
-- \texttt{tidyverse}
-- \texttt{ranger} (if using the random forest learner)
+We provide `R` code to implement the reduction-based algorithm. The following `R` packages are used:
+- `tidyverse`
+- `here` 
+- `ranger` (if using the random forest learner)
+
 
 ### Datasets
 We include the datasets:
@@ -30,9 +32,9 @@ We include the datasets:
 We cannot publicly share the data used in the consumer lending experiments.
 
 ### Usage 
-The \texttt{R} markdown scripts in the directories
-- \texttt{Compas_Experiments/}
-- \texttt{Communities_Experiments/}
+The `R` markdown scripts in the directories
+- `Compas_Experiments/`
+- `Communities_Experiments/`
 can be used to reproduce the recidivism risk prediction and regression experiments in the paper. 
 
-The functions in \texttt{Code/ExponentiatedGradient.R} implement the reduction-based algorithms. To search for the disparity minimizing model in the set of good models, see the function \texttt{run_expgrad_extremes}. To search for the absolute disparity minimizing in the set of good models, see the function \texttt{run_expgrad_minDisp}.
+The functions in `Code/ExponentiatedGradient.R` implement the reduction-based algorithms. To search for the disparity minimizing model in the set of good models, see the function `run_expgrad_extremes`. To search for the absolute disparity minimizing in the set of good models, see the function `run_expgrad_minDisp`.
