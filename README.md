@@ -1,4 +1,4 @@
-# Fairness In The Rashomon_Set (FaiRS)
+# Fairness In The Rashomon Set (FaiRS)
 
 Implementation of a reduction-based algorithm to characterize the range of predictive disparities and search for the absolute predictive disparity minimizing model over the set of good models (i.e., Rashomon Set). 
 
