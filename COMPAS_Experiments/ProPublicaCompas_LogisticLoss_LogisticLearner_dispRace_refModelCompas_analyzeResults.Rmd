@@ -1,0 +1,648 @@
+---
+title: "COMPAS ProPublica Experiments for Fairness Frontier, Logistic Loss + Logistic Regression, Race Disparities Figures and Results"
+output: html_document
+---
+
+This script creates plots to visualize the fairness frontier for race disparities in the COMPAS dataset. We focus on a logistic loss + logistic regression learner and the reference model is the COMPAS decile score.
+
+```{r}
+library(here)
+library(tidyverse)
+
+source(here("Code/Disparity_And_Loss_Functions.R"))
+source(here("Code/Lagrangian_bestResponse_Functions.R"))
+source(here("Code/ExponentiatedGradient.R"))
+```
+
+In this code chunk, we
+- load in the COMPAS data.
+- apply the same data filters as the ProPublica publicly available analysis,
+- subset the data to only white/black defendants and male defendants.
+- construct 50-50 train-test split.
+```{r}
+# Load COMPAS data
+compas_data = read.csv(file = here("Data/compas-scores-two-years.csv"))
+
+# Apply Propublic variable selections 
+compas_data = compas_data %>%
+  select(age, c_charge_degree, race, sex, priors_count, score_text, decile_score, is_recid, two_year_recid, days_b_screening_arrest)
+
+# Apply ProPublica data filters
+compas_data = compas_data %>%
+  filter(days_b_screening_arrest <= 30) %>%
+  filter(days_b_screening_arrest >= -30) %>%
+  filter(is_recid != -1) %>%
+  filter(c_charge_degree != "O") %>%
+  filter(score_text != 'N/A') %>%
+  select(-c(score_text, is_recid, days_b_screening_arrest)) %>%
+  mutate(decile_score = (decile_score - 1)/(10 - 1))
+
+# Subset data to only white and black defendants
+compas_data = compas_data %>%
+  filter(race == "African-American" | race == "Caucasian") %>%
+  filter(sex == "Male") %>%
+  select(-c(sex))
+
+# Construct protected class variable: 0 = White, 1 = African-American
+compas_data = compas_data %>%
+  mutate(
+    A = case_when(
+      race == "African-American" ~ 1, 
+      race == "Caucasian" ~ 0
+    )
+  ) %>%
+  select(-c(race))
+
+# Construct outcome variable: 0 = no two year recidivism, 1 = two year recidivism
+compas_data = compas_data %>%
+  mutate(
+    Y = case_when(
+      two_year_recid == 1 ~ 1, 
+      two_year_recid == 0 ~ 0
+    )
+  ) %>%
+  select(-c(two_year_recid))
+
+# Construct age squared variable and priors_count squared variables and an age*prior interaction.
+compas_data = compas_data %>%
+  mutate(
+    crime_factor = factor(c_charge_degree),
+    age_sq = age^2, 
+    priors_sq = priors_count^2, 
+    age_prior_int = age*priors_count
+  ) %>%
+  select(-c(c_charge_degree))
+
+# Construct 50-50 train/test split
+set.seed(1234567890)
+train_size = floor(0.5 * nrow(compas_data))
+train_ind = sample(nrow(compas_data), size = train_size)
+
+train_data <- compas_data[train_ind, ]
+test_data <- compas_data[-train_ind, ]
+
+# Compute Compas loss
+COMPAS_loss = mean(.loss_logisticRegression_helper(train_data$Y, train_data$decile_score))
+COMPAS_testLoss = mean(.loss_logisticRegression_helper(test_data$Y, test_data$decile_score))
+COMPAS_testLoss_SE = sqrt( var( .loss_logisticRegression_helper(test_data$Y, test_data$decile_score) )/nrow(test_data) )
+```
+
+## Construct statistical parity plots
+In this section, we construct plots to visualize the fairness frontier as epsilon varies for the statistical parity disparity measure.
+We construct plots for the train data and test data separately. We plot the fairness frontier based on the reduced models.
+
+```{r}
+SP_Results <- readRDS(here("Tables/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+SP_min_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+SP_max_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+
+epsilon_values = SP_Results$epsilon
+epsilon_values = round((epsilon_values - COMPAS_loss)/COMPAS_loss, digits = 3)
+
+SP_TrainResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  SP_TrainResults <- bind_rows(
+    SP_TrainResults, 
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp_Reduction = sum(SP_min_models[[eps]]$probs * SP_min_models[[eps]]$disp),
+      maxDisp_Reduction = sum(SP_max_models[[eps]]$probs * SP_max_models[[eps]]$disp),
+      minLoss_Reduction = sum(SP_min_models[[eps]]$probs * SP_min_models[[eps]]$loss),
+      maxLoss_Reduction = sum(SP_max_models[[eps]]$probs * SP_max_models[[eps]]$loss),
+      min_disp = SP_Results$min_disp[eps],
+      max_disp = SP_Results$max_disp[eps],
+      min_loss = SP_Results$min_loss[eps],
+      max_loss = SP_Results$max_loss[eps],
+      B = SP_min_models[[eps]]$B,
+      nu = SP_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Train = mean( train_data %>% filter(A == 1) %>% pull(decile_score) ) - 
+  mean(train_data %>% filter(A == 0) %>% pull(decile_score))
+
+# Plot SP results for the disparity gap
+ggplot(SP_TrainResults[c(1,3,5),], aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Train), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp_Reduction, ymax = maxDisp_Reduction), colour = "#0072B2", width = 0.25) +
+  geom_errorbar(aes(ymin = min_disp, ymax = max_disp), colour = "#009E73", width = 0.25, linetype = "dashed") + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_Disparity_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot SP results for the loss
+ggplot(SP_TrainResults %>% 
+         mutate(refLoss = COMPAS_loss + epsilon_values*COMPAS_loss,
+                refLossModel = COMPAS_loss + epsilon_values*COMPAS_loss + 2*SP_TrainResults$nu), 
+       aes(x = factor(epsilon))) + 
+  geom_point(aes(y = refLoss), colour = "black", fill = "#E69F00", size = 4, shape = 21) + 
+  geom_point(aes(y = refLossModel), colour = "black", fill = "#F0E442", size = 4, shape = 21) + 
+  geom_errorbar(aes(ymin = minLoss_Reduction, ymax = maxLoss_Reduction), colour = "#0072B2", width = 0.25) + 
+  geom_errorbar(aes(ymin = min_loss, ymax = max_loss), colour = "#009E73", width = 0.25, linetype = "dashed") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+SP_TestResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  minModels = length(SP_min_models[[eps]]$probs)
+  minLosses = rep(0, minModels)
+  minDisps = rep(0, minModels)
+  for (m in 1:minModels) {
+    test_data$SP_pred = predict(SP_min_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    minLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$SP_pred))
+    minDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(SP_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(SP_pred))
+  }
+  
+  maxModels = length(SP_max_models[[eps]]$probs)
+  maxLosses = rep(0, maxModels)
+  maxDisps = rep(0, maxModels)
+  for (m in 1:maxModels) {
+    test_data$SP_pred = predict(SP_max_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    maxLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$SP_pred))
+    maxDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(SP_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(SP_pred))
+  }
+  
+  SP_TestResults <- bind_rows(
+    SP_TestResults,
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp = sum(SP_min_models[[eps]]$probs * minDisps),
+      minLoss = sum(SP_min_models[[eps]]$probs * minLosses),
+      maxDisp = sum(SP_max_models[[eps]]$probs * maxDisps),
+      maxLoss = sum(SP_max_models[[eps]]$probs * maxLosses),
+      B = SP_min_models[[eps]]$B,
+      nu = SP_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Test = mean( test_data %>% filter(A == 1) %>% pull(decile_score) ) - 
+  mean(test_data %>% filter(A == 0) %>% pull(decile_score))
+
+# Plot SP results for the disparity gap
+ggplot(SP_TestResults, aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Test), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp, ymax = maxDisp), colour = "#0072B2", width = 0.5) +
+  geom_point(aes(y = minDisp), colour = "#0072B2") + 
+  geom_point(aes(y = maxDisp), colour = "#0072B2") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_disparity_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot SP results for the loss
+ggplot(SP_TestResults, 
+       aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = COMPAS_testLoss), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minLoss, ymax = maxLoss), colour = "#0072B2", width = 0.5) + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_loss_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+# Compute standard error for the 1% model.
+# number of observations for each event
+n_test <- nrow(test_data)
+n_0 <- nrow(test_data %>% filter(A == 0))
+n_1 <- nrow(test_data %>% filter(A == 1))
+
+minModels = length(SP_min_models[[1]]$probs)
+minModels_disp_var = c()
+minModels_loss_var = c()
+for (m in 1:minModels) {
+  test_data$model_pred = predict(SP_min_models[[1]]$riskScore[[m]], test_data, type = "response")
+  minModels_disp_var = c(minModels_disp_var, 
+                    var(test_data %>% filter(A == 1) %>% pull(model_pred))/n_1 + 
+                      var(test_data %>% filter(A == 0) %>% pull(model_pred))/n_0)
+  minModels_loss_var = c(minModels_loss_var, 
+                         var(.loss_logisticRegression_helper(test_data$Y, test_data$model_pred))/n_test )
+}
+SP_minDisp_disp_SE = sqrt( sum(minModels_disp_var * SP_min_models[[1]]$probs) + var(minDisps) )
+SP_minDisp_loss_SE = sqrt( sum(minModels_loss_var * SP_min_models[[1]]$probs) + var(minLosses) )
+
+test_data$SP_max_pred = 0
+maxModels = length(SP_max_models[[1]]$probs)
+for (m in 1:maxModels) {
+  test_data$SP_max_pred = test_data$SP_max_pred + 
+    predict(SP_max_models[[1]]$riskScore[[m]], test_data, type = "response") * SP_max_models[[1]]$probs[m]
+}
+SP_maxDisp_disp_SE = sqrt( var(test_data %>% filter(A == 1) %>% pull(SP_max_pred))/n_1 + 
+                        var(test_data %>% filter(A == 0) %>% pull(SP_max_pred))/n_0 )
+SP_maxDisp_loss_SE = sqrt( var(.loss_logisticRegression_helper(test_data$Y, test_data$SP_max_pred) )/n_test )
+
+# Compas SE
+SP_compas_disp = refModelDisp_Test
+SP_compas_disp_SE = sqrt(var(test_data %>% filter(A == 1) %>% pull(decile_score))/n_1 + 
+                           var(test_data %>% filter(A == 0) %>% pull(decile_score))/n_0)
+
+# 95% CI for the minimum disparity
+print(sprintf("CI for the minimum SP disparity, [%.3f, %.3f]", 
+              SP_TestResults$minDisp[1] - qnorm(0.975)*SP_minDisp_disp_SE, 
+              SP_TestResults$minDisp[1] + qnorm(0.975)*SP_minDisp_disp_SE))
+print(sprintf("CI for the maximum SP disparity, [%.3f, %.3f]", 
+              SP_TestResults$maxDisp[1] - qnorm(0.975)*SP_maxDisp_disp_SE, 
+              SP_TestResults$maxDisp[1] + qnorm(0.975)*SP_maxDisp_disp_SE))
+print(sprintf("CI for the Compas Score, [%.3f, %.3f]", 
+              SP_compas_disp - qnorm(0.975)*SP_compas_disp_SE, 
+              SP_compas_disp + qnorm(0.975)*SP_compas_disp_SE))
+
+# Save SP data frame for summary
+SP_table <- 
+  bind_rows(
+    tibble(model = "COMPAS score", disp_measure = "SP",
+           loss = COMPAS_testLoss, loss_se = COMPAS_testLoss_SE, disp = SP_compas_disp, disp_se = SP_compas_disp_SE),
+    tibble(model = "Disp. Minimizer", disp_measure = "SP",
+           loss = SP_TestResults$minLoss[1], loss_se = SP_minDisp_loss_SE,
+           disp = SP_TestResults$minDisp[1], disp_se = SP_minDisp_disp_SE),
+    tibble(model = "Disp. Maximizer", disp_measure = "SP",
+           loss = SP_TestResults$maxLoss[1], loss_se = SP_maxDisp_loss_SE,
+           disp = SP_TestResults$maxDisp[1], disp_se = SP_maxDisp_disp_SE),
+  )
+```
+
+## Construct balance for positive class plots
+In this section, we construct plots to visualize the fairness frontier as epsilon varies for the balance for positive class disparity measure.
+We construct plots for the train data and test data separately. We plot the fairness frontier based on the reduced models.
+
+```{r}
+BFPC_Results <- readRDS(here("Tables/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+BFPC_min_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+BFPC_max_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+
+epsilon_values = BFPC_Results$epsilon
+epsilon_values = round((epsilon_values - COMPAS_loss)/COMPAS_loss, digits = 3)
+
+BFPC_TrainResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  BFPC_TrainResults <- bind_rows(
+    BFPC_TrainResults, 
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp_Reduction = sum(BFPC_min_models[[eps]]$probs * BFPC_min_models[[eps]]$disp),
+      maxDisp_Reduction = sum(BFPC_max_models[[eps]]$probs * BFPC_max_models[[eps]]$disp),
+      minLoss_Reduction = sum(BFPC_min_models[[eps]]$probs * BFPC_min_models[[eps]]$loss),
+      maxLoss_Reduction = sum(BFPC_max_models[[eps]]$probs * BFPC_max_models[[eps]]$loss),
+      min_disp = BFPC_Results$min_disp[eps],
+      max_disp = BFPC_Results$max_disp[eps],
+      min_loss = BFPC_Results$min_loss[eps],
+      max_loss = BFPC_Results$max_loss[eps],
+      B = BFPC_min_models[[eps]]$B,
+      nu = BFPC_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Train = mean( train_data %>% filter(A == 1 & Y == 1) %>% pull(decile_score) ) - 
+  mean(train_data %>% filter(A == 0 & Y == 1) %>% pull(decile_score))
+
+# Plot BFPC results for the disparity gap
+ggplot(BFPC_TrainResults[c(1,3,5),], aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Train), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp_Reduction, ymax = maxDisp_Reduction), colour = "#0072B2", width = 0.25) +
+  geom_errorbar(aes(ymin = min_disp, ymax = max_disp), colour = "#009E73", width = 0.25, linetype = "dashed") +
+  geom_point(aes(y = minDisp_Reduction), colour = "#0072B2") + 
+  geom_point(aes(y = maxDisp_Reduction), colour = "#0072B2") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_Disparity_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot BFPC results for the loss
+ggplot(BFPC_TrainResults %>% 
+         mutate(refLoss = COMPAS_loss + epsilon_values*COMPAS_loss,
+                refLossModel = COMPAS_loss + epsilon_values*COMPAS_loss + 2*BFPC_TrainResults$nu), 
+       aes(x = factor(epsilon))) + 
+  geom_point(aes(y = refLoss), colour = "black", fill = "#E69F00", size = 4, shape = 21) + 
+  geom_point(aes(y = refLossModel), colour = "black", fill = "#F0E442", size = 4, shape = 21) + 
+  geom_errorbar(aes(ymin = minLoss_Reduction, ymax = maxLoss_Reduction), colour = "#0072B2", width = 0.25) + 
+  geom_errorbar(aes(ymin = min_loss, ymax = max_loss), colour = "#009E73", width = 0.25, linetype = "dashed") + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_Loss_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+BFPC_TestResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  minModels = length(BFPC_min_models[[eps]]$probs)
+  minLosses = rep(0, minModels)
+  minDisps = rep(0, minModels)
+  for (m in 1:minModels) {
+    test_data$BFPC_pred = predict(BFPC_min_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    minLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$BFPC_pred))
+    minDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(BFPC_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(BFPC_pred))
+  }
+  
+  maxModels = length(BFPC_max_models[[eps]]$probs)
+  maxLosses = rep(0, maxModels)
+  maxDisps = rep(0, maxModels)
+  for (m in 1:maxModels) {
+    test_data$BFPC_pred = predict(BFPC_max_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    maxLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$BFPC_pred))
+    maxDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(BFPC_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(BFPC_pred))
+  }
+  
+  BFPC_TestResults <- bind_rows(
+    BFPC_TestResults,
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp = sum(BFPC_min_models[[eps]]$probs * minDisps),
+      minLoss = sum(BFPC_min_models[[eps]]$probs * minLosses),
+      maxDisp = sum(BFPC_max_models[[eps]]$probs * maxDisps),
+      maxLoss = sum(BFPC_max_models[[eps]]$probs * maxLosses),
+      B = BFPC_min_models[[eps]]$B,
+      nu = BFPC_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Test = mean( test_data %>% filter(A == 1 & Y == 1) %>% pull(decile_score) ) - 
+  mean(test_data %>% filter(A == 0 & Y == 1) %>% pull(decile_score))
+
+# Plot BFPC results for the disparity gap
+ggplot(BFPC_TestResults, aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Test), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp, ymax = maxDisp), colour = "#0072B2", width = 0.5) + 
+  geom_point(aes(y = minDisp), colour = "#0072B2") + 
+  geom_point(aes(y = maxDisp), colour = "#0072B2") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_disparity_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot BFPC results for the loss
+ggplot(BFPC_TestResults, 
+       aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = COMPAS_testLoss ), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minLoss, ymax = maxLoss), colour = "#0072B2", width = 0.5) + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_loss_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+# Compute standard error for the 1% model
+# number of observations for each event
+n_test <- nrow(test_data)
+n_0 <- nrow(test_data %>% filter(A == 0 & Y == 1))
+n_1 <- nrow(test_data %>% filter(A == 1 & Y == 1))
+
+minModels = length(BFPC_min_models[[1]]$probs)
+minModels_disp_var = c()
+minModels_loss_var = c()
+for (m in 1:minModels) {
+  test_data$model_pred = predict(BFPC_min_models[[1]]$riskScore[[m]], test_data, type = "response")
+  minModels_disp_var = c(minModels_disp_var, 
+                    var(test_data %>% filter(A == 1 & Y == 1) %>% pull(model_pred))/n_1 + 
+                      var(test_data %>% filter(A == 0 & Y == 1) %>% pull(model_pred))/n_0)
+  minModels_loss_var = c(minModels_loss_var, 
+                         var(.loss_logisticRegression_helper(test_data$Y, test_data$model_pred))/n_test )
+}
+BFPC_minDisp_disp_SE = sqrt( sum(minModels_disp_var * BFPC_min_models[[1]]$probs) + var(minDisps) )
+BFPC_minDisp_loss_SE = sqrt( sum(minModels_loss_var * BFPC_min_models[[1]]$probs) + var(minLosses) )
+
+# Only 1 model in the max disparity.
+test_data$BFPC_max_pred = 0
+for (m in 1:maxModels) {
+  test_data$BFPC_max_pred = test_data$BFPC_max_pred + 
+    predict(BFPC_max_models[[1]]$riskScore[[m]], test_data, type = "response") * BFPC_max_models[[1]]$probs[m]
+}
+BFPC_maxDisp_disp_SE = sqrt(var(test_data %>% filter(A == 1 & Y == 1) %>% pull(BFPC_max_pred))/n_1 + 
+                         var(test_data %>% filter(A == 0 & Y == 1) %>% pull(BFPC_max_pred))/n_0)
+BFPC_maxDisp_loss_SE = sqrt( var(.loss_logisticRegression_helper(test_data$Y, test_data$BFPC_max_pred) )/n_test )
+
+# Compas SE
+BFPC_compas_disp = refModelDisp_Test
+BFPC_compas_disp_SE = sqrt(var(test_data %>% filter(A == 1 & Y == 1) %>% pull(decile_score))/n_1 + 
+                        var(test_data %>% filter(A == 0 & Y == 1) %>% pull(decile_score))/n_0)
+
+# 95% CI for the minimum disparity
+print(sprintf("CI for the minimum BFPC disparity, [%.3f, %.3f]", 
+              BFPC_TestResults$minDisp[1] - qnorm(0.975)*BFPC_minDisp_disp_SE, 
+              BFPC_TestResults$minDisp[1] + qnorm(0.975)*BFPC_minDisp_disp_SE))
+print(sprintf("CI for the maximum BFPC disparity, [%.3f, %.3f]", 
+              BFPC_TestResults$maxDisp[1] - qnorm(0.975)*BFPC_maxDisp_disp_SE, 
+              BFPC_TestResults$maxDisp[1] + qnorm(0.975)*BFPC_maxDisp_disp_SE))
+print(sprintf("CI for the Compas Score, [%.3f, %.3f]", 
+              BFPC_compas_disp - qnorm(0.975)*BFPC_compas_disp_SE, 
+              BFPC_compas_disp + qnorm(0.975)*BFPC_compas_disp_SE))
+
+# Save BFPC data frame for summary
+BFPC_table <- 
+  bind_rows(
+    tibble(model = "COMPAS score", disp_measure = "BFPC",
+           loss = COMPAS_testLoss, loss_se = COMPAS_testLoss_SE, disp = BFPC_compas_disp, disp_se = BFPC_compas_disp_SE),
+    tibble(model = "Disp. Minimizer", disp_measure = "BFPC",
+           loss = BFPC_TestResults$minLoss[1], loss_se = BFPC_minDisp_loss_SE,
+           disp = BFPC_TestResults$minDisp[1], disp_se = BFPC_minDisp_disp_SE),
+    tibble(model = "Disp. Maximizer", disp_measure = "BFPC",
+           loss = BFPC_TestResults$maxLoss[1], loss_se = BFPC_maxDisp_loss_SE,
+           disp = BFPC_TestResults$maxDisp[1], disp_se = BFPC_maxDisp_disp_SE),
+  )
+```
+
+## Construct balance for negative class plots
+In this section, we construct plots to visualize the fairness frontier as epsilon varies for the balance for negative class disparity measure.
+We construct plots for the train data and test data separately. We plot the fairness frontier based on the reduced models.
+
+```{r}
+BFNC_Results <- readRDS(here("Tables/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+BFNC_min_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+BFNC_max_models <- readRDS(here("Models/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+
+epsilon_values = BFNC_Results$epsilon
+epsilon_values = round((epsilon_values - COMPAS_loss)/COMPAS_loss, digits = 3)
+
+BFNC_TrainResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  BFNC_TrainResults <- bind_rows(
+    BFNC_TrainResults, 
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp_Reduction = sum(BFNC_min_models[[eps]]$probs * BFNC_min_models[[eps]]$disp),
+      maxDisp_Reduction = sum(BFNC_max_models[[eps]]$probs * BFNC_max_models[[eps]]$disp),
+      minLoss_Reduction = sum(BFNC_min_models[[eps]]$probs * BFNC_min_models[[eps]]$loss),
+      maxLoss_Reduction = sum(BFNC_max_models[[eps]]$probs * BFNC_max_models[[eps]]$loss),
+      min_disp = BFNC_Results$min_disp[eps],
+      max_disp = BFNC_Results$max_disp[eps],
+      min_loss = BFNC_Results$min_loss[eps],
+      max_loss = BFNC_Results$max_loss[eps],
+      B = BFNC_min_models[[eps]]$B,
+      nu = BFNC_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Train = mean( train_data %>% filter(A == 1 & Y == 0) %>% pull(decile_score) ) - 
+  mean(train_data %>% filter(A == 0 & Y == 0) %>% pull(decile_score))
+
+# Plot BFNC results for the disparity gap
+ggplot(BFNC_TrainResults[c(1,3,5),], aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Train), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp_Reduction, ymax = maxDisp_Reduction), colour = "#0072B2", width = 0.25) +
+  geom_errorbar(aes(ymin = min_disp, ymax = max_disp), colour = "#009E73", width = 0.25, linetype = "dashed") + 
+  geom_point(aes(y = minDisp_Reduction), colour = "#0072B2") + 
+  geom_point(aes(y = maxDisp_Reduction), colour = "#0072B2") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_Disparity_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot BFNC results for the loss
+ggplot(BFNC_TrainResults %>% 
+         mutate(refLoss = COMPAS_loss + epsilon_values*COMPAS_loss,
+                refLossModel = COMPAS_loss + epsilon_values*COMPAS_loss + 2*BFNC_TrainResults$nu), 
+       aes(x = factor(epsilon))) + 
+  geom_point(aes(y = refLoss), colour = "black", fill = "#E69F00", size = 4, shape = 21) + 
+  geom_point(aes(y = refLossModel), colour = "black", fill = "#F0E442", size = 4, shape = 21) + 
+  geom_errorbar(aes(ymin = minLoss_Reduction, ymax = maxLoss_Reduction), colour = "#0072B2", width = 0.25) + 
+  geom_errorbar(aes(ymin = min_loss, ymax = max_loss), colour = "#009E73", width = 0.25, linetype = "dashed") + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_Loss_train.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+BFNC_TestResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  minModels = length(BFNC_min_models[[eps]]$probs)
+  minLosses = rep(0, minModels)
+  minDisps = rep(0, minModels)
+  for (m in 1:minModels) {
+    test_data$BFNC_pred = predict(BFNC_min_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    minLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$BFNC_pred))
+    minDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(BFNC_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(BFNC_pred))
+  }
+  
+  maxModels = length(BFNC_max_models[[eps]]$probs)
+  maxLosses = rep(0, maxModels)
+  maxDisps = rep(0, maxModels)
+  for (m in 1:maxModels) {
+    test_data$BFNC_pred = predict(BFNC_max_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    maxLosses[m] = mean(.loss_logisticRegression_helper(test_data$Y, test_data$BFNC_pred))
+    maxDisps[m] = mean( test_data %>% filter(A == 1) %>% pull(BFNC_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(BFNC_pred))
+  }
+  
+  BFNC_TestResults <- bind_rows(
+    BFNC_TestResults,
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp = sum(BFNC_min_models[[eps]]$probs * minDisps),
+      minLoss = sum(BFNC_min_models[[eps]]$probs * minLosses),
+      maxDisp = sum(BFNC_max_models[[eps]]$probs * maxDisps),
+      maxLoss = sum(BFNC_max_models[[eps]]$probs * maxLosses),
+      B = BFNC_min_models[[eps]]$B,
+      nu = BFNC_min_models[[eps]]$nu
+    )
+  )
+}
+refModelDisp_Test = mean( test_data %>% filter(A == 1 & Y == 0) %>% pull(decile_score) ) - 
+  mean(test_data %>% filter(A == 0 & Y == 0) %>% pull(decile_score))
+
+# Plot BFNC results for the disparity gap
+ggplot(BFNC_TestResults, aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = refModelDisp_Test), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minDisp, ymax = maxDisp), colour = "#0072B2", width = 0.5) +
+  geom_point(aes(y = minDisp), colour = "#0072B2") + 
+  geom_point(aes(y = maxDisp), colour = "#0072B2") +
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Disparity") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_disparity_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+
+# Plot BFNC results for the loss
+ggplot(BFNC_TestResults, 
+       aes(x = factor(epsilon))) + 
+  geom_hline(aes(yintercept = COMPAS_testLoss ), colour = "#E69F00", linetype = "dashed") + 
+  geom_errorbar(aes(ymin = minLoss, ymax = maxLoss), colour = "#0072B2", width = 0.5) + 
+  scale_x_discrete(breaks = c("1", "2.5", "5", "7.5", "10"), 
+                   labels = c("1%", "2.5%", "5%", "7.5%", "10%")) + 
+  labs(x = "Loss Tolerance", y = "Average Loss") + theme_bw() + 
+  ggsave(here("Figures/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_loss_test.jpeg"), 
+         height = 3, width = 5, units = "in")
+```
+
+```{r}
+# Compute standard error for the disparity of 1% model
+# number of observations for each event
+n_test <- nrow(test_data)
+n_0 <- nrow(test_data %>% filter(A == 0 & Y == 0))
+n_1 <- nrow(test_data %>% filter(A == 1 & Y == 0))
+
+minModels = length(BFNC_min_models[[1]]$probs)
+minModels_disp_var = c()
+minModels_loss_var = c()
+for (m in 1:minModels) {
+  test_data$model_pred = predict(BFNC_min_models[[1]]$riskScore[[m]], test_data, type = "response")
+  minModels_disp_var = c(minModels_disp_var, 
+                    var(test_data %>% filter(A == 1 & Y == 0) %>% pull(model_pred))/n_1 + 
+                      var(test_data %>% filter(A == 0 & Y == 0) %>% pull(model_pred))/n_0)
+  minModels_loss_var = c(minModels_loss_var, 
+                         var(.loss_logisticRegression_helper(test_data$Y, test_data$model_pred))/n_test )
+}
+BFNC_minDisp_disp_SE = sqrt( sum(minModels_disp_var * BFNC_min_models[[1]]$probs) + var(minDisps) )
+BFNC_minDisp_loss_SE = sqrt( sum(minModels_loss_var * BFNC_min_models[[1]]$probs) + var(minLosses) )
+
+# Only 1 model in the max disparity.
+test_data$BFNC_max_pred = 0
+maxModels = length(BFNC_max_models[[1]]$probs)
+for (m in 1:maxModels) {
+  test_data$BFNC_max_pred = test_data$BFNC_max_pred + 
+    predict(BFNC_max_models[[1]]$riskScore[[m]], test_data, type = "response") * BFNC_max_models[[1]]$probs[m]
+}
+BFNC_maxDisp_disp_SE = sqrt(var(test_data %>% filter(A == 1 & Y == 0) %>% pull(BFNC_max_pred))/n_1 + 
+                         var(test_data %>% filter(A == 0 & Y == 0) %>% pull(BFNC_max_pred))/n_0)
+BFNC_maxDisp_loss_SE = sqrt( var(.loss_logisticRegression_helper(test_data$Y, test_data$BFNC_max_pred) )/n_test )
+
+# Compas SE
+BFNC_compas_disp = refModelDisp_Test
+BFNC_compas_disp_SE = sqrt(var(test_data %>% filter(A == 1 & Y == 1) %>% pull(decile_score))/n_1 + 
+                        var(test_data %>% filter(A == 0 & Y == 1) %>% pull(decile_score))/n_0)
+
+# 95% CI for the minimum disparity
+print(sprintf("CI for the minimum BFNC disparity, [%.3f, %.3f]", 
+              BFNC_TestResults$minDisp[1] - qnorm(0.975)*BFNC_minDisp_disp_SE, 
+              BFNC_TestResults$minDisp[1] + qnorm(0.975)*BFNC_minDisp_disp_SE))
+print(sprintf("CI for the maximum BFNC disparity, [%.3f, %.3f]", 
+              BFNC_TestResults$maxDisp[1] - qnorm(0.975)*BFNC_maxDisp_disp_SE, 
+              BFNC_TestResults$maxDisp[1] + qnorm(0.975)*BFNC_maxDisp_disp_SE))
+print(sprintf("CI for the Compas Score, [%.3f, %.3f]", 
+              BFNC_compas_disp - qnorm(0.975)*BFNC_compas_disp_SE, 
+              BFNC_compas_disp + qnorm(0.975)*BFNC_compas_disp_SE))
+
+# Save BFNC data frame for summary
+BFNC_table <- 
+  bind_rows(
+    tibble(model = "COMPAS score", disp_measure = "BFNC",
+           loss = COMPAS_testLoss, loss_se = COMPAS_testLoss_SE, disp = BFNC_compas_disp, disp_se = BFNC_compas_disp_SE),
+    tibble(model = "Disp. Minimizer", disp_measure = "BFNC",
+           loss = BFNC_TestResults$minLoss[1], loss_se = BFNC_minDisp_loss_SE,
+           disp = BFNC_TestResults$minDisp[1], disp_se = BFNC_minDisp_disp_SE),
+    tibble(model = "Disp. Maximizer", disp_measure = "BFNC",
+           loss = BFNC_TestResults$maxLoss[1], loss_se = BFNC_maxDisp_loss_SE,
+           disp = BFNC_TestResults$maxDisp[1], disp_se = BFNC_maxDisp_disp_SE),
+  )
+```

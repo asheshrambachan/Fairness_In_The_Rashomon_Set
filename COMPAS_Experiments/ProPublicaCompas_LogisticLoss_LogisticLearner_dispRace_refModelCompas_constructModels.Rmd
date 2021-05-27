@@ -1,0 +1,332 @@
+---
+title: "COMPAS ProPublica Experiments for Fairness Frontier, Logistic Loss + Logistic Regression, Race Disparities"
+output: html_notebook
+---
+
+This notebook constructs a series of experiments to analyze different properties of the fairness frontier using the 
+ProPublica COMPAS Dataset. This script constructs the fairness frontier for a logistic regression learner with logistic regression loss. We calibrate the fairness frontier using the Compas decile score as the reference model.
+
+```{r echo = FALSE}
+library(here)
+library(tidyverse)
+library(tictoc)
+
+source(here("Code/Disparity_And_Loss_Functions.R"))
+source(here("Code/Lagrangian_bestResponse_Functions.R"))
+source(here("Code/ExponentiatedGradient.R"))
+source(here("Code/Discretization.R"))
+```
+
+In this code chunk, we
+  - load in the COMPAS data.
+  - apply the same data filters as the ProPublica publicly available analysis,
+  - subset the data to only white/black defendants and male defendants.
+  - construct 50-50 train-test split.
+```{r}
+# Load COMPAS data
+compas_data = read.csv(file = here("Data/compas-scores-two-years.csv"))
+
+# Apply Propublic variable selections 
+compas_data = compas_data %>%
+  select(age, c_charge_degree, race, sex, priors_count, score_text, decile_score, is_recid, two_year_recid, days_b_screening_arrest)
+
+# Apply ProPublica data filters
+compas_data = compas_data %>%
+  filter(days_b_screening_arrest <= 30) %>%
+        filter(days_b_screening_arrest >= -30) %>%
+        filter(is_recid != -1) %>%
+        filter(c_charge_degree != "O") %>%
+        filter(score_text != 'N/A') %>%
+  select(-c(score_text, is_recid, days_b_screening_arrest)) %>%
+  mutate(decile_score = (decile_score - 1)/(10 - 1))
+
+# Subset data to only white and black defendants
+compas_data = compas_data %>%
+  filter(race == "African-American" | race == "Caucasian") %>%
+  filter(sex == "Male") %>%
+  select(-c(sex))
+
+# Construct protected class variable: 0 = White, 1 = African-American
+compas_data = compas_data %>%
+  mutate(
+    A = case_when(
+      race == "African-American" ~ 1, 
+      race == "Caucasian" ~ 0
+    )
+  ) %>%
+  select(-c(race))
+
+# Construct outcome variable: 0 = no two year recidivism, 1 = two year recidivism
+compas_data = compas_data %>%
+  mutate(
+    Y = case_when(
+      two_year_recid == 1 ~ 1, 
+      two_year_recid == 0 ~ 0
+    )
+  ) %>%
+  select(-c(two_year_recid))
+
+# Construct age squared variable and priors_count squared variables and an age*prior interaction.
+compas_data = compas_data %>%
+  mutate(
+    crime_factor = factor(c_charge_degree),
+    age_sq = age^2, 
+    priors_sq = priors_count^2, 
+    age_prior_int = age*priors_count
+  ) %>%
+  select(-c(c_charge_degree))
+
+# Construct 50-50 train/test split
+set.seed(1234567890)
+train_size = floor(0.5 * nrow(compas_data))
+train_ind = sample(nrow(compas_data), size = train_size)
+
+train_data <- compas_data[train_ind, ]
+test_data <- compas_data[-train_ind, ]
+```
+
+# We construct the loss associated with the decile COMPAS score. We also construct a model that approximates the Compas score.
+```{r}
+# Construct logistic loss of decile COMPAS score in train data
+COMPAS_loss = mean(.loss_logisticRegression_helper(train_data$Y, train_data$decile_score))
+```
+
+# Parameters for the fairness frontier
+```{r}
+N = 40
+n.iters = 500
+epsilon_values = COMPAS_loss + c(0.01, 0.025, 0.05, 0.075, 0.1)*COMPAS_loss
+```
+
+# Statistical Parity Analysis
+```{r}
+SP_extremes_analysis = tibble()
+SP_min_models = vector(mode = "list", length = length(epsilon_values))
+SP_max_models = vector(mode = "list", length = length(epsilon_values))
+SP_min_timing = c()
+SP_max_timing = c()
+
+for (eps in 1:length(epsilon_values)) {
+  print(sprintf("----- Starting epsilon = %.2f ------ \n", epsilon_values[eps]))
+  
+  print(sprintf("----- Staring min ----- \n"))
+  tic()
+  SP_min_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "SP", 
+                                        protected_class = 1, loss_function = "logistic", 
+                                        learner = "logistic", eps = epsilon_values[eps], 
+                                        B = 0.5*sqrt(nrow(train_data)), N = N, n.iters = n.iters, debug = FALSE)
+  min_time <- toc()
+  SP_min_timing <- c(SP_min_timing, min_time$toc - min_time$tic)
+  SP_min_reduction = reduceSolutions_extremes(costs = SP_min_results$costs, disps = SP_min_results$disps,
+                                     epshat = SP_min_results$param$epshat)
+  SP_min_models[[eps]] = list(
+    riskScore = SP_min_results$risk_scores[which(SP_min_reduction > 0)],
+    loss = SP_min_results$losses[which(SP_min_reduction > 0)],
+    disp = SP_min_results$disps[which(SP_min_reduction > 0)], 
+    probs = SP_min_reduction[which(SP_min_reduction > 0)],
+    eps = SP_min_results$param$eps, 
+    B = SP_min_results$param$B, 
+    nu = SP_min_results$param$nu
+  )
+  
+  print(sprintf("----- Staring max ----- \n"))
+  tic()
+  SP_max_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "SP",
+                                        protected_class = 0, loss_function = "logistic",
+                                        learner = "logistic", eps = epsilon_values[eps], 
+                                        N = N, n.iters = n.iters, B = sqrt(nrow(train_data)), 
+                                        debug = FALSE)
+  max_time <- toc()
+  SP_max_timing <- c(SP_max_timing, max_time$toc - max_time$tic)
+  SP_max_reduction = reduceSolutions_extremes(costs = SP_max_results$costs, disps = SP_max_results$disps,
+                                     epshat = SP_max_results$param$epshat)
+  SP_max_models[[eps]] = list(
+    riskScore = SP_max_results$risk_scores[which(SP_max_reduction > 0)],
+    loss = SP_max_results$losses[which(SP_max_reduction > 0)],
+    disp = -SP_max_results$disps[which(SP_max_reduction > 0)],
+    probs = SP_max_reduction[which(SP_max_reduction > 0)],
+    eps = SP_max_results$param$eps,
+    B = SP_max_results$param$B, 
+    nu = SP_max_results$param$nu
+  )
+  
+  SP_extremes_analysis = bind_rows(
+    SP_extremes_analysis, 
+    tibble(
+      epsilon = epsilon_values[eps],
+      min_disp = mean(SP_min_results$disps),
+      min_loss = mean(SP_min_results$losses),
+      min_feasible = SP_min_results$feasible,
+      max_disp = -mean(SP_max_results$disps),
+      max_loss = mean(SP_max_results$losses),
+      max_feasible = SP_max_results$feasible
+    )
+  )
+  
+  rm(SP_min_results, SP_max_results, SP_min_reduction, SP_max_reduction)
+}
+saveRDS(SP_extremes_analysis, 
+        file = here("Tables/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+saveRDS(SP_min_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+saveRDS(SP_max_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_SP_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+print(sprintf("Average SP Min Time = %.3f min", mean(SP_min_timing)/60))
+print(sprintf("Average SP Max Time = %.3f min", mean(SP_max_timing)/60))
+```
+
+# Balance for the Positive Class Analysis
+```{r}
+BFPC_extremes_analysis = tibble()
+BFPC_min_models = vector(mode = "list", length = length(epsilon_values))
+BFPC_max_models = vector(mode = "list", length = length(epsilon_values))
+BFPC_min_timing = c()
+BFPC_max_timing = c()
+
+for (eps in 1:length(epsilon_values)) {
+  print(sprintf("----- Starting epsilon = %.2f ------ \n", epsilon_values[eps]))
+  
+  print(sprintf("----- Staring min ----- \n"))
+  tic()
+  BFPC_min_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "BFPC", 
+                                        protected_class = 1, loss_function = "logistic", 
+                                        learner = "logistic", eps = epsilon_values[eps], B = 0.5*sqrt(nrow(train_data)), 
+                                        N = N, n.iters = n.iters)
+  min_time = toc()
+  BFPC_min_timing <- c(BFPC_min_timing, min_time$toc - min_time$tic)
+  BFPC_min_reduction = reduceSolutions_extremes(costs = BFPC_min_results$costs, disps = BFPC_min_results$disps,
+                                     epshat = BFPC_min_results$param$epshat)
+  BFPC_min_models[[eps]] = list(
+    riskScore = BFPC_min_results$risk_scores[which(BFPC_min_reduction > 0)],
+    loss = BFPC_min_results$losses[which(BFPC_min_reduction > 0)],
+    disp = BFPC_min_results$disps[which(BFPC_min_reduction > 0)],
+    probs = BFPC_min_reduction[which(BFPC_min_reduction > 0)],
+    eps = BFPC_min_results$param$eps, 
+    B = BFPC_min_results$param$B,
+    nu = BFPC_min_results$param$nu
+  )
+  
+  print(sprintf("----- Staring max ----- \n"))
+  tic()
+  BFPC_max_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "BFPC",
+                                        protected_class = 0, loss_function = "logistic",
+                                        learner = "logistic", eps = epsilon_values[eps], B = sqrt(nrow(train_data)), 
+                                        N = N, n.iters = n.iters, 
+                                        debug = FALSE)
+  max_time <- toc()
+  BFPC_max_timing <- c(BFPC_max_timing, max_time$toc - max_time$tic)
+  BFPC_max_reduction = reduceSolutions_extremes(costs = BFPC_max_results$costs, disps = BFPC_max_results$disps,
+                                     epshat = BFPC_max_results$param$epshat)
+  BFPC_max_models[[eps]] = list(
+    riskScore = BFPC_max_results$risk_scores[which(BFPC_max_reduction > 0)],
+    loss = BFPC_max_results$losses[which(BFPC_max_reduction > 0)],
+    disp = -BFPC_max_results$disps[which(BFPC_max_reduction > 0)], 
+    probs = BFPC_max_reduction[which(BFPC_max_reduction > 0)],
+    eps = BFPC_max_results$param$eps, 
+    B = BFPC_max_results$param$B,
+    nu = BFPC_max_results$param$nu
+  )
+  
+  BFPC_extremes_analysis = bind_rows(
+    BFPC_extremes_analysis, 
+    tibble(
+      epsilon = epsilon_values[eps],
+      min_disp = mean(BFPC_min_results$disps),
+      min_loss = mean(BFPC_min_results$losses),
+      min_feasible = BFPC_min_results$feasible,
+      max_disp = -mean(BFPC_max_results$disps),
+      max_loss = mean(BFPC_max_results$losses),
+      max_feasible = BFPC_max_results$feasible
+    )
+  )
+  
+  rm(BFPC_min_results, BFPC_max_results, BFPC_min_reduction, BFPC_max_reduction)
+}
+saveRDS(BFPC_extremes_analysis, 
+        file = here("Tables/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+saveRDS(BFPC_min_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+saveRDS(BFPC_max_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_BFPC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+print(sprintf("Average BFPC Min Time = %.3f min", mean(BFPC_min_timing)/60))
+print(sprintf("Average BFPC Max Time = %.3f min", mean(BFPC_max_timing)/60))
+```
+
+# Balance for the negative class analysis
+```{r}
+BFNC_extremes_analysis = tibble()
+BFNC_min_models = vector(mode = "list", length = length(epsilon_values))
+BFNC_max_models = vector(mode = "list", length = length(epsilon_values))
+BFNC_min_timing <- c()
+BFNC_max_timing <- c()
+
+for (eps in 1:length(epsilon_values)) {
+  print(sprintf("----- Starting epsilon = %.2f ------ \n", epsilon_values[eps]))
+  
+  print(sprintf("----- Staring min ----- \n"))
+  tic()
+  BFNC_min_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "BFNC", 
+                                        protected_class = 1, loss_function = "logistic", 
+                                        learner = "logistic", eps = epsilon_values[eps], 
+                                        B = 0.5*sqrt(nrow(train_data)), N = N, n.iters = n.iters)
+  min_time <- toc()
+  BFNC_min_timing <- c(BFNC_min_timing, min_time$toc - min_time$tic)
+  BFNC_min_reduction = reduceSolutions_extremes(costs = BFNC_min_results$costs, disps = BFNC_min_results$disps,
+                                     epshat = BFNC_min_results$param$epshat)
+  BFNC_min_models[[eps]] = list(
+    riskScore = BFNC_min_results$risk_scores[which(BFNC_min_reduction > 0)],
+    loss = BFNC_min_results$losses[which(BFNC_min_reduction > 0)],
+    disp = BFNC_min_results$disps[which(BFNC_min_reduction > 0)],
+    probs = BFNC_min_reduction[which(BFNC_min_reduction > 0)],
+    eps = BFNC_min_results$param$eps, 
+    B = BFNC_min_results$param$B,
+    nu = BFNC_min_results$param$nu
+  )
+  
+  print(sprintf("----- Staring max ----- \n"))
+  tic()
+  BFNC_max_results = run_expgrad_extremes(data = train_data %>% select(-c(decile_score)), disparity_measure = "BFNC",
+                                        protected_class = 0, loss_function = "logistic",
+                                        learner = "logistic", eps = epsilon_values[eps], 
+                                        B = sqrt(nrow(train_data)), N = N, n.iters = n.iters, 
+                                        debug = FALSE)
+  max_time <- toc()
+  BFNC_max_timing <- c(BFNC_max_timing, max_time$toc - max_time$tic)
+  BFNC_max_reduction = reduceSolutions_extremes(costs = BFNC_max_results$costs, disps = BFNC_max_results$disps,
+                                     epshat = BFNC_max_results$param$epshat)
+  BFNC_max_models[[eps]] = list(
+    riskScore = BFNC_max_results$risk_scores[which(BFNC_max_reduction > 0)],
+    loss = BFNC_max_results$losses[which(BFNC_max_reduction > 0)],
+    disp = -BFNC_max_results$disps[which(BFNC_max_reduction > 0)],
+    probs = BFNC_max_reduction[which(BFNC_max_reduction > 0)],
+    eps = BFNC_max_results$param$eps,
+    B = BFNC_max_results$param$B,
+    nu = BFNC_max_results$param$nu
+  )
+  
+  BFNC_extremes_analysis = bind_rows(
+    BFNC_extremes_analysis, 
+    tibble(
+      epsilon = epsilon_values[eps],
+      min_disp = mean(BFNC_min_results$disps),
+      min_loss = mean(BFNC_min_results$losses),
+      min_feasible = BFNC_min_results$feasible,
+      max_disp = -mean(BFNC_max_results$disps),
+      max_loss = mean(BFNC_max_results$losses),
+      max_feasible = BFNC_max_results$feasible
+    )
+  )
+  
+  rm(BFNC_min_results, BFNC_max_results, BFNC_min_reduction, BFNC_max_reduction)
+}
+saveRDS(BFNC_extremes_analysis, 
+        file = here("Tables/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_dispRace_refModelCompas_ExtremesAnalysis.Rds"))
+saveRDS(BFNC_min_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_minDispModels.Rds"))
+saveRDS(BFNC_max_models, 
+        file = here("Models/Compas/dispRace_refModelCompas/COMPAS_BFNC_LogisticLoss_LogisticLearner_ExtremesAnalysis_dispRace_refModelCompas_maxDispModels.Rds"))
+print(sprintf("Average BFNC Min Time = %.3f min", mean(BFNC_min_timing)/60))
+print(sprintf("Average BFNC Max Time = %.3f min", mean(BFNC_max_timing)/60))
+```
+
+

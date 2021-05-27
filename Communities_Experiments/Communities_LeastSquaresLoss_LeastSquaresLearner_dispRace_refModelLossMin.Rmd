@@ -1,0 +1,243 @@
+---
+title: "Communities and Law Experiments For Fairness Frontier"
+output: html_document
+---
+
+This notebook constructs a series of experiments to analyze different properties of the fairness frontier using the 
+Communities and Law Dataset. This script constructs the fairness frontier for a least squares learner with least squares loss. We calibrate the fairness frontier using the loss minimizing model as the reference model.
+
+```{r echo = FALSE}
+library(here)
+library(tidyverse)
+
+source(here("Code/Disparity_And_Loss_Functions.R"))
+source(here("Code/Lagrangian_bestResponse_Functions.R"))
+source(here("Code/ExponentiatedGradient.R"))
+source(here("Code/Discretization.R"))
+```
+
+In this code chunk, we
+- load in the Communities and Law Data.
+- We construct the protected group var: A = 1 if the majority of the community is white.
+- Drop columns with missing values.
+- construct 50-50 train-test split.
+```{r warning = FALSE}
+# Load communities data
+communities_data = read.csv('https://archive.ics.uci.edu/ml/machine-learning-databases/communities/communities.data',
+                            na.strings = "?", header = F, fill = F, strip.white = T)
+communities_colnames <- read.csv(here("Data/Communities_ColNames.csv"),
+                                 na.strings = "?", header = F, fill = F, strip.white = T, stringsAsFactors = FALSE)
+colnames(communities_data) <- communities_colnames[,1]
+communities_data <- communities_data %>% select(-c(state, county, community, communityname, fold))  
+rm(communities_colnames)
+
+# Construct the protected group var and rename the outcome
+communities_data <- communities_data %>%
+  mutate(
+    A = ifelse(racePctWhite > racepctblack & racePctWhite > racePctAsian & racePctWhite > racePctHisp, 1, 0)
+  ) %>%
+  rename(
+    Y = ViolentCrimesPerPop
+  )
+
+# Drop observations with missing values
+communities_data <- communities_data[, colSums(is.na(communities_data)) == 0]
+
+# Construct the 50-50 train test split.
+set.seed(1234567890)
+train_size = floor(0.5 * nrow(communities_data))
+train_ind = sample(nrow(communities_data), size = train_size)
+
+train_data <- communities_data[train_ind, ]
+test_data <- communities_data[-train_ind, ]
+```
+
+# We construct the loss associated with the loss minimizing model
+```{r}
+# Construct loss minimizing model over training data
+loss_minimizer = lm(Y ~., train_data %>% select(-c(A)))
+train_data$lossMinPred = predict(loss_minimizer, newdata = train_data, type = "response")
+test_data$lossMinPred = predict(loss_minimizer, newdata = test_data, type = "response")
+
+# Construct loss and disparity in train data
+lossMin_trainLoss = mean(.loss_leastSquares_helper(train_data$Y, train_data$lossMinPred))
+lossMin_trainAbsDisp = abs( mean( train_data %>% filter(A == 1) %>% pull(lossMinPred) ) - 
+                              mean(train_data %>% filter(A == 0) %>% pull(lossMinPred)) )
+lossMin_trainDisp = mean( train_data %>% filter(A == 1) %>% pull(lossMinPred) ) - 
+  mean(train_data %>% filter(A == 0) %>% pull(lossMinPred)) 
+
+# Construct loss and disparity in test data
+lossMin_testLoss = mean(.loss_leastSquares_helper(test_data$Y, test_data$lossMinPred))
+lossMin_testAbsDisp = abs( mean( test_data %>% filter(A == 1) %>% pull(lossMinPred) ) - 
+                             mean(test_data %>% filter(A == 0) %>% pull(lossMinPred)) )
+lossMin_testDisp = mean( test_data %>% filter(A == 1) %>% pull(lossMinPred) ) - 
+  mean(test_data %>% filter(A == 0) %>% pull(lossMinPred)) 
+```
+
+# Parameters for the fairness frontier
+```{r}
+N = 40
+n.iters = 500
+B = 0.5*sqrt(nrow(train_data))
+epsilon_values = lossMin_trainLoss + c(0.01, 0.025, 0.05, 0.075, 0.1)*lossMin_trainLoss
+```
+
+# Statistical Parity Analysis
+```{r}
+SP_minDisp_analysis = tibble()
+SP_models = vector(mode = "list", length = length(epsilon_values))
+
+for (eps in 1:length(epsilon_values)) {
+  print(sprintf("----- Starting epsilon = %.2f ------ \n", epsilon_values[eps]))
+  
+  SP_results = run_expgrad_minDisp(data = train_data %>% select(-c(lossMinPred)), 
+                                   disparity_measure = "SP", protected_class = 0, 
+                                   learner = "least squares", loss_function = "least squares",
+                                   N = N, eps = epsilon_values[eps], n.iters = n.iters, 
+                                   B = 0.5*B, nu = 10^(-5), debug = TRUE)
+  
+  SP_reduction = reduceSolutions_minDisp(costs = SP_results$costs, 
+                                         disps = SP_results$absdisps,
+                                         epshat = SP_results$param$epshat)
+  SP_models[[eps]] = list(
+    riskScore = SP_results$risk_scores[which(SP_reduction > 0)],
+    loss = SP_results$losses[which(SP_reduction > 0)],
+    abs_disp = SP_results$absdisps[which(SP_reduction > 0)], 
+    probs = SP_reduction[which(SP_reduction > 0)],
+    eps = SP_results$param$eps, 
+    B = SP_results$param$B, 
+    nu = SP_results$param$nu
+  )
+  
+  SP_minDisp_analysis = bind_rows(
+    SP_minDisp_analysis, 
+    tibble(
+      epsilon = epsilon_values[eps],
+      abs_disp = mean(SP_results$absdisps),
+      loss = mean(SP_results$losses),
+      feasible = SP_results$feasible
+    )
+  )
+  rm(SP_results, SP_reduction)
+}
+saveRDS(SP_minDisp_analysis, 
+        file = here("Tables/Communities/Communities_SP_LeastSquaresLoss_LeastSquaresLearner_minDispAnalysis.Rds"))
+saveRDS(SP_models, 
+        file = here("Models/Communities/Communities_SP_LeastSquaresLoss_LeastSquaresLearner_minDispModels.Rds"))
+```
+
+# Evaluate Resulting Models Over The Train Set
+```{r}
+SP_TrainResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  SP_TrainResults <- bind_rows(
+    SP_TrainResults, 
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      minDisp_Reduction = sum(SP_models[[eps]]$probs * SP_models[[eps]]$abs_disp),
+      minLoss_Reduction = sum(SP_models[[eps]]$probs * SP_models[[eps]]$loss),
+      minDisp = SP_minDisp_analysis$abs_disp[eps],
+      minLoss = mean(SP_minDisp_analysis$loss[eps]),
+      B = SP_models[[eps]]$B,
+      nu = SP_models[[eps]]$nu
+    )
+  )
+}
+saveRDS(SP_TrainResults, 
+        file = here("Tables/Communities/Communities_SP_LeastSquaresLoss_LeastSquaresLearner_TrainResults.Rds"))
+```
+# Evaluate Resulting Models over the Test Set
+```{r}
+SP_TestResults <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  models = length(SP_models[[eps]]$probs)
+  losses = rep(0, models)
+  abs_disps = rep(0, models)
+  disps = rep(0, models)
+  for (m in 1:models) {
+    test_data$SP_pred = predict(SP_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    losses[m] = mean(.loss_leastSquares_helper(test_data$Y, test_data$SP_pred))
+    abs_disps[m] = abs( mean( test_data %>% filter(A == 1) %>% pull(SP_pred) ) - 
+                          mean(test_data %>% filter(A == 0) %>% pull(SP_pred)) )
+    disps[m] = mean( test_data %>% filter(A == 1) %>% pull(SP_pred) ) - 
+      mean(test_data %>% filter(A == 0) %>% pull(SP_pred))
+  }
+  
+  SP_TestResults <- bind_rows(
+    SP_TestResults,
+    tibble(
+      epsilon = 100*epsilon_values[eps],
+      abs_disp = sum(SP_models[[eps]]$probs * abs_disps),
+      disp = sum(SP_models[[eps]]$probs * disps),
+      loss = sum(SP_models[[eps]]$probs * losses),
+      B = SP_models[[eps]]$B,
+      nu = SP_models[[eps]]$nu
+    )
+  )
+}
+saveRDS(SP_TestResults, 
+        file = here("Tables/Communities/Communities_SP_LeastSquaresLoss_LeastSquaresLearner_TestResults.Rds"))
+```
+
+# Compute standard Errors on the epsilon = 0.10 model over the test set.
+```{r}
+# compute standard errors for SP disparity
+n_test <- nrow(test_data)
+n_0 <- nrow(test_data %>% filter(A == 0))
+n_1 <- nrow(test_data %>% filter(A == 1))
+
+SP_testResults_withSEs <- tibble()
+for (eps in 1:length(epsilon_values)) {
+  models = length(SP_models[[eps]]$probs)
+  models_disp_var = c()
+  models_loss_var = c()
+  for (m in 1:models) {
+    test_data$model_pred = predict(SP_models[[eps]]$riskScore[[m]], test_data, type = "response")
+    models_disp_var = c(models_disp_var, 
+                        var(test_data %>% filter(A == 1) %>% pull(model_pred))/n_1 + 
+                          var(test_data %>% filter(A == 0) %>% pull(model_pred))/n_0)
+    models_loss_var = c(models_loss_var, 
+                        var(.loss_leastSquares_helper(test_data$Y, test_data$model_pred))/n_test )
+  }
+  models_disp_var_mean = sum(models_disp_var * SP_models[[eps]]$probs)
+  models_loss_var_mean = sum(models_loss_var * SP_models[[eps]]$probs)
+  SP_disp_SE = sqrt( models_disp_var_mean + sum( models_loss_var_mean * (disps - models_disp_var_mean)^2 ) )
+  SP_loss_SE = sqrt( models_loss_var_mean + sum( models_loss_var_mean * (losses - models_loss_var_mean)^2 ) )
+  
+  SP_testResults_withSEs <- bind_rows(
+    SP_testResults_withSEs,
+    tibble(
+      epsilon = 100*((epsilon_values[eps] - lossMin_trainLoss)/lossMin_trainLoss), 
+      loss = SP_TestResults$loss[eps],
+      disp = SP_TestResults$disp[eps],
+      loss_se = SP_loss_SE,
+      disp_se = SP_disp_SE
+    )
+  )
+}
+rm(models, models_disp_var, models_disp_var_mean, models_loss_var,
+   models_loss_var_mean, SP_disp_SE, SP_loss_SE)
+saveRDS(SP_testResults_withSEs, 
+        file = here("Tables/Communities/Communities_SP_LeastSquaresLoss_LeastSquaresLearner_TestResults_withSEs.Rds"))
+
+# SE associated with reference model
+lossMin_disp_SE = sqrt(var(test_data %>% filter(A == 1) %>% pull(lossMinPred))/n_1 + 
+                         var(test_data %>% filter(A == 0) %>% pull(lossMinPred))/n_0)
+lossMin_loss_SE = sqrt( var(.loss_leastSquares_helper(test_data$Y, test_data$lossMinPred))/n_test )
+
+# 95% CI for the minimum disparity
+print(sprintf("CI for the Reference Model disparity, [%.3f, %.3f]", 
+              lossMin_testDisp - qnorm(0.975)*lossMin_disp_SE, 
+              lossMin_testDisp + qnorm(0.975)*lossMin_disp_SE))
+print(sprintf("CI for the Reference Model loss, [%.3f, %.3f]", 
+              lossMin_testLoss - qnorm(0.975)*lossMin_loss_SE, 
+              lossMin_testLoss + qnorm(0.975)*lossMin_loss_SE))
+View(SP_testResults_withSEs %>%
+       mutate(
+         disp_lb = disp - qnorm(0.975)*disp_se,
+         disp_ub = disp + qnorm(0.975)*disp_se,
+         loss_lb = loss - qnorm(0.975)*loss_se,
+         loss_ub = loss + qnorm(0.975)*loss_se
+       ) %>%
+       select(epsilon, disp_lb, disp_ub, loss_lb, loss_ub))
+``` 
