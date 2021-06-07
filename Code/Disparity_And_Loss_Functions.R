@@ -22,7 +22,6 @@
 # The c_function helper function is used to implement the function cost, which takes as input
 # an augmented dataset of rows (Y_i, A_i, X_i, z) and adds as a column c(Y, Z).
 
-library(tidyverse)
 
 # DISPARITY FUNCTIONS -----
 computeDisparity_riskScore <- function(augmented_data, disparity_measure, protected_class) {
@@ -76,7 +75,7 @@ computeDisparity_riskScore <- function(augmented_data, disparity_measure, protec
                       pull (temp)) / mean( augmented_data %>% 
                                            filter(A == protected_class) %>% 
                                            pull (g)) # we flip the sign on this since the researcher would like to maximize
-  } else { # same for both "BFPC_INCLUDE_UNOBS" and  "BFNC_INCLUDE_UNOBS" since the difference is in g (= mu for BFPC and = (1-mu) for BFNC)
+  } else { # same for both "BFPC_INCLUDE_UNOBS" and  "BFNC_INCLUDE_UNOBS" since the difference is in g (which is = mu for BFPC and = (1-mu) for BFNC)
     result = mean( augmented_data %>% filter(A == protected_class) %>%
                      mutate(temp = threshold_classifier*g) %>% 
                      pull (temp)) / mean( augmented_data %>% 

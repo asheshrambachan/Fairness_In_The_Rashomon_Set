@@ -11,8 +11,6 @@
 #
 # Part 4 implements the best response functions for the Q, lambda players respectively.
 
-library(tidyverse)
-
 # DATA AUGMENTATION FUNCTION -----
 data_augment_grid <- function( data, N ) {
   # Inputs 
@@ -85,7 +83,8 @@ data_augment_grid <- function( data, N ) {
   #   - protected_class: 0, 1 value that specifies protected class.
   # Output
   #   - list with entries
-  #       p0 = E_n[g] = p1
+  #       p0 = E_n[g(X)1(A = protected_class)]
+  #       p1 = E_n[g(X)1(A = !protected_class)]
   
   if (protected_class != 0 & protected_class != 1) { 
     stop("Invalid input to 'protected_class'. Must equal 0 or 1")
@@ -93,8 +92,8 @@ data_augment_grid <- function( data, N ) {
   
   return(
     list(
-      p0 = mean(augmented_data$g),
-      p1 = mean(augmented_data$g)
+      p0 = mean((augmented_data$g)*(augmented_data$A == protected_class)),
+      p1 = mean((augmented_data$g)*(augmented_data$A != protected_class))
     )
   )
 }
@@ -131,7 +130,9 @@ data_augment_grid <- function( data, N ) {
   #   - protected_class: 0, 1 value that specifies protected class.
   # Output
   #   - list with entries
-  #       p0 = E_n[g] = p1
+  #   - list with entries
+  #       p0 = E_n[g(X)1(A = protected_class)]
+  #       p1 = E_n[g(X)1(A = !protected_class)]
   
   if (protected_class != 0 & protected_class != 1) { 
     stop("Invalid input to 'protected_class'. Must equal 0 or 1")
@@ -139,8 +140,8 @@ data_augment_grid <- function( data, N ) {
   
   return(
     list(
-      p0 = mean(augmented_data$g),
-      p1 = mean(augmented_data$g)
+      p0 = mean((augmented_data$g)*(augmented_data$A == protected_class)),
+      p1 = mean((augmented_data$g)*(augmented_data$A != protected_class))
     )
   )
 }
@@ -215,7 +216,7 @@ data_augment_grid <- function( data, N ) {
   #   - protected_class: 0, 1 value that specifies protected class.
   # Output
   #   - list with entries
-  #       p0 = E_n[g]
+  #       p0 = E_n[g(X)1(A = protected_class)]
   
   if (protected_class != 0 & protected_class != 1) { 
     stop("Invalid input to 'protected_class'. Must equal 0 or 1")
@@ -223,7 +224,7 @@ data_augment_grid <- function( data, N ) {
   
   return(
     list(
-      p0 = mean(augmented_data$g)
+      p0 = mean(augmented_data$g*(augmented_data$A == protected_class))
     )
   )
 }
