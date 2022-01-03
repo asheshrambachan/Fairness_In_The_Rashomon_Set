@@ -4,17 +4,22 @@ Implementation of a reduction-based algorithm to characterize the range of predi
 
 If you find this repository useful for your research, please consider citing our work:
 ```
-@misc{coston2021characterizing,
-      title         = {Characterizing Fairness Over the Set of Good Models Under       
-                       Selective Labels}, 
-      author        = {Amanda Coston and Ashesh Rambachan and Alexandra Chouldechova},
-      year          = {2021},
-      eprint        = {2101.00352},
-      archivePrefix = {arXiv},
-      primaryClass  = {cs.LG}
+
+@InProceedings{pmlr-v139-coston21a,
+  title = 	 {Characterizing Fairness Over the Set of Good Models Under Selective Labels},
+  author =       {Coston, Amanda and Rambachan, Ashesh and Chouldechova, Alexandra},
+  booktitle = 	 {Proceedings of the 38th International Conference on Machine Learning},
+  pages = 	 {2144--2155},
+  year = 	 {2021},
+  editor = 	 {Meila, Marina and Zhang, Tong},
+  volume = 	 {139},
+  series = 	 {Proceedings of Machine Learning Research},
+  month = 	 {18--24 Jul},
+  publisher =    {PMLR}
 }
+
 ```
-This paper will appear in ICML 2021. Here is the [arXiv link](https://arxiv.org/abs/2101.00352) to the paper.
+Here are the [proceedings link](https://proceedings.mlr.press/v139/coston21a.html) and [arXiv link](https://arxiv.org/abs/2101.00352) to the paper.
 
 ### Requirements
 
